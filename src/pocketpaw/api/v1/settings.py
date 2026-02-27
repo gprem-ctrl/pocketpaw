@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from pocketpaw.api.deps import require_scope
 
@@ -65,8 +65,6 @@ async def update_settings(request: Request):
                     validation_errors.append(warning)
 
     if validation_errors:
-        from fastapi import HTTPException
-
         raise HTTPException(
             status_code=400,
             detail={"errors": validation_errors}
