@@ -85,6 +85,7 @@ class SlackAdapter(BaseChannelAdapter):
             "/model",
             "/tools",
             "/help",
+            "/kill",
         ):
 
             @app.command(_cmd_name)
