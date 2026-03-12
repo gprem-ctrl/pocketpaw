@@ -33,10 +33,10 @@ _TOOL_PATH_KEYS: dict[str, list[str]] = {
 # Regex to extract file paths from Bash command strings.
 # Matches absolute paths and common relative paths with an extension.
 _BASH_PATH_RE = re.compile(
-    r"(?<!\w)"           # not preceded by a word character
+    r"(?<!\w)"  # not preceded by a word character
     r"((?:[~/]|\./|\.\./)"  # must start with ~, /, ./ or ../
     r"[^\s;|&<>\"'`]+)"  # followed by non-whitespace/shell-special chars
-    r"(?!\w)",           # not followed by a word character
+    r"(?!\w)",  # not followed by a word character
     re.ASCII,
 )
 
