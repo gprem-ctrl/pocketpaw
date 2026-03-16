@@ -47,7 +47,17 @@ def load_reminders() -> list[dict]:
             data = json.loads(path.read_text())
             return data.get("reminders", [])
         except Exception:
-            pass
+            logger.warning(
+                "Failed to load reminders from %s — file may be corrupted. "
+                "Backing up to %s.bak and starting with empty reminders.",
+                path,
+                path,
+                exc_info=True,
+            )
+            try:
+                path.rename(path.with_suffix(".json.bak"))
+            except Exception:
+                logger.debug("Failed to back up corrupted reminders file", exc_info=True)
     return []
 
 
