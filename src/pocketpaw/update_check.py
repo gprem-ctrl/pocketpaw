@@ -241,3 +241,25 @@ def mark_version_seen(version: str, config_dir: Path) -> None:
         cache_file.write_text(json.dumps(cache))
     except OSError:
         logger.debug("Failed to mark version %s as seen", version, exc_info=True)
+
+
+async def check_for_updates_async(current_version: str, config_dir: Path) -> dict | None:
+    """Non-blocking wrapper around check_for_updates().
+
+    Offloads the blocking urllib call to asyncio.to_thread() so the
+    FastAPI event loop is never stalled.  The /api/version route should
+    call this instead of the synchronous check_for_updates().
+    """
+    import asyncio
+
+    return await asyncio.to_thread(check_for_updates, current_version, config_dir)
+
+
+async def fetch_release_notes_async(version: str, config_dir: Path) -> str:
+    """Non-blocking wrapper around fetch_release_notes().
+
+    Offloads the blocking urllib call to asyncio.to_thread().
+    """
+    import asyncio
+
+    return await asyncio.to_thread(fetch_release_notes, version, config_dir)
