@@ -226,7 +226,7 @@ class AgentLoop:
                         )
                     )
                 except Exception:
-                    pass
+                    logger.exception("Audit log failed for kill_session action on %s", message.session_key)
 
                 await self.bus.publish_outbound(
                     OutboundMessage(
@@ -455,7 +455,7 @@ class AgentLoop:
                         )
                     )
             except Exception:
-                pass  # Never let AGENTS.md discovery break the processing pipeline
+                logger.debug("AGENTS.md discovery failed for %s", agents_md_dir, exc_info=True)  # Never let AGENTS.md discovery break the processing pipeline
 
             # 2b. Emit thinking event
             # 2b. Periodic identity reinforcement for long conversations.
@@ -552,7 +552,7 @@ class AgentLoop:
                                 total_cost_usd=meta.get("total_cost_usd"),
                             )
                         except Exception:
-                            pass
+                            logger.debug("Usage tracker record failed", exc_info=True)
 
                     elif etype == "tool_use":
                         tool_name = meta.get("name") or meta.get("tool", "unknown")
@@ -574,7 +574,7 @@ class AgentLoop:
                                 tool_name, tool_input if isinstance(tool_input, dict) else {}
                             )
                         except Exception:
-                            pass
+                            logger.debug("Recent files tracker failed for tool %s", tool_name, exc_info=True)
 
                         # AskUserQuestion — forward the question to the
                         # client so the user can see and answer it.
@@ -708,13 +708,13 @@ class AgentLoop:
                     context={"session_key": session_key},
                 )
             except Exception:
-                pass
+                logger.exception("Health engine error recording failed")
             # Kill the backend on error
             if router is not None:
                 try:
                     await router.stop()
                 except Exception:
-                    pass
+                    logger.debug("Router stop failed during error cleanup", exc_info=True)
 
             # Apply output redaction to exception messages
             error_msg = redact_output(f"An error occurred: {str(e)}")
