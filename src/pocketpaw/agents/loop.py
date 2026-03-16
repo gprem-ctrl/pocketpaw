@@ -226,7 +226,9 @@ class AgentLoop:
                         )
                     )
                 except Exception:
-                    logger.exception("Audit log failed for kill_session action on %s", message.session_key)
+                    logger.exception(
+                        "Audit log failed for kill_session action on %s", message.session_key
+                    )
 
                 await self.bus.publish_outbound(
                     OutboundMessage(
@@ -455,7 +457,8 @@ class AgentLoop:
                         )
                     )
             except Exception:
-                logger.debug("AGENTS.md discovery failed for %s", agents_md_dir, exc_info=True)  # Never let AGENTS.md discovery break the processing pipeline
+                # Never let AGENTS.md discovery break the processing pipeline
+                logger.debug("AGENTS.md discovery failed for %s", agents_md_dir, exc_info=True)
 
             # 2b. Emit thinking event
             # 2b. Periodic identity reinforcement for long conversations.
@@ -574,7 +577,9 @@ class AgentLoop:
                                 tool_name, tool_input if isinstance(tool_input, dict) else {}
                             )
                         except Exception:
-                            logger.debug("Recent files tracker failed for tool %s", tool_name, exc_info=True)
+                            logger.debug(
+                                "Recent files tracker failed for tool %s", tool_name, exc_info=True
+                            )
 
                         # AskUserQuestion — forward the question to the
                         # client so the user can see and answer it.
