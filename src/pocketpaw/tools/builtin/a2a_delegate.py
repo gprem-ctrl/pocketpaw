@@ -29,7 +29,9 @@ class A2ADelegateTool(BaseTool):
 
     @property
     def trust_level(self) -> str:
-        return "standard"
+        # Elevated because this tool makes outbound HTTP requests to external URLs.
+        # Relies on the SSRF check below; still warrants elevated scrutiny.
+        return "elevated"
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -71,74 +73,84 @@ class A2ADelegateTool(BaseTool):
                 if not hostname:
                     return self._error("Invalid URL hostname.")
 
-                loop = asyncio.get_event_loop()
-                ip_str = await loop.run_in_executor(None, socket.gethostbyname, hostname)
-                ip = ipaddress.ip_address(ip_str)
+                loop = asyncio.get_running_loop()
+                # Use getaddrinfo to get all resolved IPs (protects against multi-A record bypass)
+                addr_infos = await loop.run_in_executor(None, socket.getaddrinfo, hostname, None)
 
-                if (
-                    ip.is_private
-                    or ip.is_loopback
-                    or ip.is_link_local
-                    or ip.is_multicast
-                    or ip.is_reserved
-                ):
-                    return self._error(
-                        f"SSRF Protection: Access to local/private IP ({ip_str}) is denied. "
-                        "Add this URL to the 'a2a_trusted_agents' allowlist in settings to permit."
-                    )
+                # Check ALL returned IPs. Also note: DNS rebinding is mitigated by the allowlist
+                # but could theoretically happen between this check and the HTTP request if
+                # the TTL is 0. Operators should use the allowlist for full safety.
+                for addr in addr_infos:
+                    ip_str = addr[4][0]
+                    ip = ipaddress.ip_address(ip_str)
+
+                    if (
+                        ip.is_private
+                        or ip.is_loopback
+                        or ip.is_link_local
+                        or ip.is_multicast
+                        or ip.is_reserved
+                    ):
+                        return self._error(
+                            f"SSRF Protection: Hostname resolves to local/private IP ({ip_str}), "
+                            "denied. Add this URL to the 'a2a_trusted_agents' allowlist in "
+                            "settings to permit."
+                        )
             except Exception as e:
                 return self._error(f"URL validation failed: {str(e)}")
 
-        client = A2AClient()
-
-        try:
-            # 1. Discover capabilities
-            card = await client.get_agent_card(agent_url)
-        except Exception as e:
-            return self._error(
-                f"Failed to fetch Agent Card from {agent_url}: {e}\n"
-                f"Ensure the agent is running and supports A2A."
-            )
-
-        # Ensure the remote agent advertises at least some capability
-        if not card.capabilities.streaming and not card.skills:
-            return self._error(f"Agent at {agent_url} advertises no usable capabilities/skills.")
-
-        # 2. Support multi-turn by fetching history if task_id provided
-        history_parts = []
-        if task_id:
+        async with A2AClient() as client:
             try:
-                existing_task = await client.get_task(agent_url, task_id)
-                # Ensure the external agent actually supports state transitions
-                if not card.capabilities.state_transition_history:
-                    return self._error(
-                        f"Agent at {agent_url} does not support multi-turn task history."
-                    )
-
-                # A2A protocol: to continue a task, send the full history in the message
-                # For simplicity here we assume the new message just appends to what was discussed
-                for msg in existing_task.history:
-                    history_parts.extend(msg.parts)
+                # 1. Discover capabilities
+                card = await client.get_agent_card(agent_url)
             except Exception as e:
                 return self._error(
-                    f"Failed to retrieve existing task {task_id} from {agent_url}: {e}"
+                    f"Failed to fetch Agent Card from {agent_url}: {e}\n"
+                    f"Ensure the agent is running and supports A2A."
                 )
 
-        # 3. Formulate task parameters
-        parts = history_parts + [TextPart(text=task)]
+            # Ensure the remote agent advertises at least some capability
+            if not card.capabilities.streaming and not card.skills:
+                return self._error(
+                    f"Agent at {agent_url} advertises no usable capabilities/skills."
+                )
 
-        # If continuing, we MUST send the same task_id
-        send_kwargs = {"message": A2AMessage(role="user", parts=parts)}
-        if task_id:
-            send_kwargs["id"] = task_id
+            # 2. Support multi-turn by fetching history if task_id provided
+            history_messages: list[A2AMessage] = []
+            if task_id:
+                try:
+                    existing_task = await client.get_task(agent_url, task_id)
+                    # Ensure the external agent actually supports state transitions
+                    if not card.capabilities.state_transition_history:
+                        return self._error(
+                            f"Agent at {agent_url} does not support multi-turn task history."
+                        )
 
-        params = TaskSendParams(**send_kwargs)
+                    # Preserve the message-level structure so the remote agent can
+                    # distinguish its own previous responses from user turns.
+                    # DO NOT flatten parts across messages — that loses role info.
+                    history_messages = list(existing_task.history)
+                except Exception as e:
+                    return self._error(
+                        f"Failed to retrieve existing task {task_id} from {agent_url}: {e}"
+                    )
 
-        try:
-            # 4. Submit task (blocking send for now)
-            result_task = await client.send_task(agent_url, params)
-        except Exception as e:
-            return self._error(f"Failed to submit task to {agent_url}: {e}")
+            # 3. Formulate task parameters
+            # The new user turn is sent as a fresh message; prior turns go in history.
+            new_message = A2AMessage(role="user", parts=[TextPart(text=task)])
+
+            # If continuing, we MUST send the same task_id
+            send_kwargs: dict = {"message": new_message, "history": history_messages}
+            if task_id:
+                send_kwargs["id"] = task_id
+
+            params = TaskSendParams(**send_kwargs)
+
+            try:
+                # 4. Submit task (blocking send for now)
+                result_task = await client.send_task(agent_url, params)
+            except Exception as e:
+                return self._error(f"Failed to submit task to {agent_url}: {e}")
 
         # Extract final response message
         if not result_task.status.message or not result_task.status.message.parts:

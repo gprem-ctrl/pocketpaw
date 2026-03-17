@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
+import socket
+from unittest.mock import AsyncMock, patch, MagicMock
 
 import httpx
 import pytest
 
-from pocketpaw.a2a.client import A2AClient
+from pocketpaw.a2a.client import A2AClient, _handle_response
 from pocketpaw.a2a.models import (
     A2AMessage,
     AgentCapabilities,
@@ -51,6 +52,17 @@ def mock_task() -> Task:
 
 
 class TestA2AClient:
+    async def test_handle_response_error(self):
+        mock_response = AsyncMock(spec=httpx.Response)
+        mock_response.status_code = 400
+        mock_response.text = "Bad Request"
+
+        error = httpx.HTTPStatusError("Error", request=AsyncMock(), response=mock_response)
+        mock_response.raise_for_status.side_effect = error
+
+        with pytest.raises(RuntimeError, match="A2A remote agent error 400: Bad Request"):
+            _handle_response(mock_response)
+
     async def test_get_agent_card_success(self, mock_agent_card):
         client = A2AClient()
         mock_response = AsyncMock(spec=httpx.Response)
@@ -134,8 +146,6 @@ class TestA2AClient:
 
         mock_response.aiter_lines.side_effect = mock_aiter_lines
 
-        from unittest.mock import MagicMock
-
         mock_stream_context = MagicMock()
         mock_stream_context.__aenter__ = AsyncMock(return_value=mock_response)
         mock_stream_context.__aexit__ = AsyncMock(return_value=None)
@@ -158,6 +168,25 @@ class TestA2AClient:
                 json=params.model_dump(mode="json", exclude_none=True),
             )
 
+    async def test_context_manager_reuses_client(self, mock_task):
+        """Verify that using A2AClient as a context manager shares a single httpx client."""
+        mock_response = AsyncMock(spec=httpx.Response)
+        mock_response.content = mock_task.model_dump_json().encode()
+
+        mock_httpx_client = AsyncMock()
+        mock_httpx_client.get.return_value = mock_response
+        mock_httpx_client.post.return_value = mock_response
+        mock_httpx_client.aclose = AsyncMock()
+
+        with patch("httpx.AsyncClient", return_value=mock_httpx_client) as MockHttpxClient:
+            async with A2AClient() as a2a_client:
+                await a2a_client.get_task("http://localhost:8001", "task-1")
+                await a2a_client.get_task("http://localhost:8001", "task-2")
+
+            # httpx.AsyncClient must only be constructed once (shared for both calls)
+            MockHttpxClient.assert_called_once()
+            assert mock_httpx_client.aclose.called, "Shared client should be closed on exit"
+
 
 class TestA2ADelegateTool:
     @pytest.fixture(autouse=True)
@@ -171,6 +200,8 @@ class TestA2ADelegateTool:
 
         with patch("pocketpaw.tools.builtin.a2a_delegate.A2AClient") as MockClient:
             mock_client = MockClient.return_value
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.__aexit__ = AsyncMock(return_value=None)
             mock_client.get_agent_card = AsyncMock(return_value=mock_agent_card)
             mock_client.send_task = AsyncMock(return_value=mock_task)
 
@@ -188,6 +219,8 @@ class TestA2ADelegateTool:
 
         with patch("pocketpaw.tools.builtin.a2a_delegate.A2AClient") as MockClient:
             mock_client = MockClient.return_value
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.__aexit__ = AsyncMock(return_value=None)
             mock_client.get_agent_card = AsyncMock(
                 side_effect=httpx.ConnectError("Connection refused")
             )
@@ -214,6 +247,8 @@ class TestA2ADelegateTool:
 
         with patch("pocketpaw.tools.builtin.a2a_delegate.A2AClient") as MockClient:
             mock_client = MockClient.return_value
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.__aexit__ = AsyncMock(return_value=None)
             mock_client.get_agent_card = AsyncMock(return_value=mock_agent_card)
             mock_client.get_task = AsyncMock(return_value=existing_task)
             mock_client.send_task = AsyncMock(return_value=mock_task)
@@ -225,14 +260,22 @@ class TestA2ADelegateTool:
             assert "Error" not in result
             mock_client.get_task.assert_called_once_with("http://localhost:8001", "test-task-123")
 
-            # Verify send_task was called with the combined history
+            # Verify send_task was called with the new message separate from history
             call_args = mock_client.send_task.call_args
-            sent_params = call_args[0][1]
+            sent_params: TaskSendParams = call_args[0][1]
             assert sent_params.id == "test-task-123"
-            assert len(sent_params.message.parts) == 3
-            assert sent_params.message.parts[0].text == "Hello"
-            assert sent_params.message.parts[1].text == "Hi there"
-            assert sent_params.message.parts[2].text == "Help me more"
+
+            # The new user turn must be its own message with only the new text
+            assert len(sent_params.message.parts) == 1
+            assert sent_params.message.parts[0].text == "Help me more"
+            assert sent_params.message.role == "user"
+
+            # History must preserve the original message structure (two messages, not flattened)
+            assert len(sent_params.history) == 2
+            assert sent_params.history[0].role == "user"
+            assert sent_params.history[0].parts[0].text == "Hello"
+            assert sent_params.history[1].role == "agent"
+            assert sent_params.history[1].parts[0].text == "Hi there"
 
     async def test_delegate_tool_multi_turn_unsupported(self, mock_agent_card, mock_task):
         tool = A2ADelegateTool()
@@ -241,6 +284,8 @@ class TestA2ADelegateTool:
 
         with patch("pocketpaw.tools.builtin.a2a_delegate.A2AClient") as MockClient:
             mock_client = MockClient.return_value
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.__aexit__ = AsyncMock(return_value=None)
             mock_client.get_agent_card = AsyncMock(return_value=mock_agent_card)
             mock_client.get_task = AsyncMock(return_value=mock_task)
 
@@ -264,6 +309,8 @@ class TestA2ADelegateTool:
 
         with patch("pocketpaw.tools.builtin.a2a_delegate.A2AClient") as MockClient:
             mock_client = MockClient.return_value
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.__aexit__ = AsyncMock(return_value=None)
             mock_client.get_agent_card = AsyncMock(return_value=mock_agent_card)
 
             result = await tool.execute(agent_url="http://localhost:8001", task="Help me")
@@ -276,6 +323,8 @@ class TestA2ADelegateTool:
 
         with patch("pocketpaw.tools.builtin.a2a_delegate.A2AClient") as MockClient:
             mock_client = MockClient.return_value
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.__aexit__ = AsyncMock(return_value=None)
             mock_client.get_agent_card = AsyncMock(return_value=mock_agent_card)
             mock_client.send_task = AsyncMock(side_effect=httpx.TimeoutException("Timeout"))
 
@@ -284,3 +333,51 @@ class TestA2ADelegateTool:
             assert result.startswith("Error:")
             assert "Failed to submit task" in result
             assert "Timeout" in result
+
+    # --- SSRF Protection Tests ---
+
+    async def test_ssrf_private_ip_blocked(self):
+        tool = A2ADelegateTool()
+        with patch("pocketpaw.tools.builtin.a2a_delegate.get_settings") as mock_get_settings:
+            mock_get_settings.return_value.a2a_trusted_agents = []
+            target = "pocketpaw.tools.builtin.a2a_delegate.socket.getaddrinfo"
+            with patch(target) as mock_getaddrinfo:
+                # Return multiple IPs, one is private
+                mock_getaddrinfo.return_value = [
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("8.8.8.8", 80)),
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("192.168.1.5", 80)),
+                ]
+
+                result = await tool.execute(agent_url="http://evil.com", task="Help")
+                assert result.startswith("Error:")
+                assert "SSRF Protection" in result
+                assert "192.168.1.5" in result
+
+    async def test_ssrf_invalid_scheme_blocked(self):
+        tool = A2ADelegateTool()
+        with patch("pocketpaw.tools.builtin.a2a_delegate.get_settings") as mock_get_settings:
+            mock_get_settings.return_value.a2a_trusted_agents = []
+
+            result = await tool.execute(agent_url="ftp://evil.com", task="Help")
+            assert result.startswith("Error:")
+            assert "Invalid URL scheme" in result
+
+    async def test_ssrf_public_ip_allowed(self, mock_agent_card, mock_task):
+        tool = A2ADelegateTool()
+        with patch("pocketpaw.tools.builtin.a2a_delegate.get_settings") as mock_get_settings:
+            mock_get_settings.return_value.a2a_trusted_agents = []
+            target = "pocketpaw.tools.builtin.a2a_delegate.socket.getaddrinfo"
+            with patch(target) as mock_getaddrinfo:
+                mock_getaddrinfo.return_value = [
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("8.8.8.8", 80)),
+                ]
+
+                with patch("pocketpaw.tools.builtin.a2a_delegate.A2AClient") as MockClient:
+                    mock_client = MockClient.return_value
+                    mock_client.__aenter__.return_value = mock_client
+                    mock_client.__aexit__ = AsyncMock(return_value=None)
+                    mock_client.get_agent_card = AsyncMock(return_value=mock_agent_card)
+                    mock_client.send_task = AsyncMock(return_value=mock_task)
+
+                    result = await tool.execute(agent_url="http://good.com", task="Help")
+                    assert not result.startswith("Error:")

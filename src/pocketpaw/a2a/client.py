@@ -1,4 +1,7 @@
-from collections.abc import AsyncGenerator
+from __future__ import annotations
+
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
 
 import httpx
 
@@ -17,15 +20,54 @@ def _handle_response(response: httpx.Response) -> bytes:
 
 
 class A2AClient:
-    """Asynchronous client for interacting with external A2A agents."""
+    """Asynchronous client for interacting with external A2A agents.
 
-    def __init__(self, timeout: float = 120.0):
+    Can be used as an async context manager to share a single
+    ``httpx.AsyncClient`` across multiple calls — useful for multi-turn
+    workflows where opening a new TCP connection per request adds latency::
+
+        async with A2AClient() as client:
+            card = await client.get_agent_card(url)
+            task = await client.send_task(url, params)
+
+    When used without the context manager each method opens and closes its
+    own connection, which is fine for one-off calls.
+    """
+
+    def __init__(self, timeout: float = 120.0) -> None:
         self.timeout = timeout
+        self._shared_client: httpx.AsyncClient | None = None
+
+    # ------------------------------------------------------------------
+    # Async context manager — shared persistent connection
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self) -> A2AClient:
+        self._shared_client = httpx.AsyncClient(timeout=self.timeout)
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        if self._shared_client is not None:
+            await self._shared_client.aclose()
+            self._shared_client = None
+
+    @asynccontextmanager
+    async def _get_client(self) -> AsyncIterator[httpx.AsyncClient]:
+        """Yield the shared client if one exists, otherwise open a temporary one."""
+        if self._shared_client is not None:
+            yield self._shared_client
+        else:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                yield client
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     async def get_agent_card(self, base_url: str) -> AgentCard:
         """Fetch the Agent Card capabilities manifest from a remote agent."""
         url = f"{base_url.rstrip('/')}/.well-known/agent.json"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with self._get_client() as client:
             response = await client.get(url)
             content = _handle_response(response)
             return AgentCard.model_validate_json(content)
@@ -33,7 +75,7 @@ class A2AClient:
     async def send_task(self, base_url: str, params: TaskSendParams) -> Task:
         """Submit a task to a remote A2A agent (blocking response)."""
         url = f"{base_url.rstrip('/')}/a2a/tasks/send"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with self._get_client() as client:
             response = await client.post(
                 url, json=params.model_dump(mode="json", exclude_none=True)
             )
@@ -46,7 +88,7 @@ class A2AClient:
         """Submit a task and yield SSE events from a remote A2A agent."""
         url = f"{base_url.rstrip('/')}/a2a/tasks/send/stream"
         payload = params.model_dump(mode="json", exclude_none=True)
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with self._get_client() as client:
             async with client.stream("POST", url, json=payload) as response:
                 _handle_response(response)
                 async for line in response.aiter_lines():
@@ -56,7 +98,7 @@ class A2AClient:
     async def get_task(self, base_url: str, task_id: str) -> Task:
         """Poll the current status of a previously submitted task."""
         url = f"{base_url.rstrip('/')}/a2a/tasks/{task_id}"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with self._get_client() as client:
             response = await client.get(url)
             content = _handle_response(response)
             return Task.model_validate_json(content)
@@ -64,6 +106,6 @@ class A2AClient:
     async def cancel_task(self, base_url: str, task_id: str) -> None:
         """Request cancellation of an in-flight task."""
         url = f"{base_url.rstrip('/')}/a2a/tasks/{task_id}/cancel"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with self._get_client() as client:
             response = await client.post(url)
             _handle_response(response)
