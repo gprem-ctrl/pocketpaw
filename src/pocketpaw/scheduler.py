@@ -164,7 +164,7 @@ def parse_natural_time(text: str) -> datetime | None:
     """Parse natural language time expressions.
 
     Supports:
-    - "in X minutes/hours/days" or "X minutes/hours/days" (with or without "in")
+    - "in X minutes/hours/days/weeks" or "X minutes/hours/days/weeks" (with or without "in")
     - "at HH:MM" or "at H:MM AM/PM"
     - "tomorrow at HH:MM"
     - Absolute dates/times
@@ -172,8 +172,10 @@ def parse_natural_time(text: str) -> datetime | None:
     text = text.lower().strip()
     now = datetime.now(tz=UTC)
 
-    # Pattern: "in X minutes/hours/days" or "X minutes/hours/days" (in is optional)
-    relative_match = re.search(r"(?:in\s+)?(\d+)\s*(minute|min|hour|hr|day|second|sec)s?\b", text)
+    # Pattern: "in X minutes/hours/days/weeks" or "X minutes/hours/days/weeks" (in is optional)
+    pattern = r"(?:in\s+)?(\d+)\s*(minute|min|hour|hr|day|week|second|sec)s?\b"
+    relative_match = re.search(pattern, text)
+
     if relative_match:
         amount = int(relative_match.group(1))
         unit = relative_match.group(2)
@@ -184,6 +186,8 @@ def parse_natural_time(text: str) -> datetime | None:
             return now + timedelta(hours=amount)
         elif unit == "day":
             return now + timedelta(days=amount)
+        elif unit == "week":
+            return now + timedelta(weeks=amount)
         elif unit in ("second", "sec"):
             return now + timedelta(seconds=amount)
 
@@ -235,7 +239,7 @@ def extract_reminder_text(message: str) -> str:
     # Remove common patterns
     patterns = [
         r"^remind\s+me\s+",
-        r"in\s+\d+\s*(minute|min|hour|hr|day|second|sec)s?\s*",
+        r"in\s+\d+\s*(minute|min|hour|hr|day|week|second|sec)s?\s*",
         r"at\s+\d{1,2}:?\d{0,2}\s*(am|pm)?\s*",
         r"tomorrow\s*",
         r"^to\s+",
